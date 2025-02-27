@@ -111,24 +111,47 @@ model = TranslateTransformer(
 model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()
 
-def translate(model, sentence, src_tokenizer, src_vocab, tgt_vocab, max_len=200):
+def translate(model, sentence, src_tokenizer, src_vocab, tgt_vocab, max_len=200, beam_size=3):
     model.eval()
     # Prepare source sentence with start and end tokens.
     tokens = ["ببدأ"] + src_tokenizer(sentence) + ["نهها"]
     src_indices = [src_vocab.stoi.get(tok, src_vocab.stoi["<unk>"]) for tok in tokens]
     src_tensor = torch.tensor(src_indices).unsqueeze(1).to(device)  # [src_len, 1]
-    trg_tokens = ["<sos>"]
+
+    # Initialize beam with the <sos> token.
+    initial_idx = tgt_vocab.stoi["<sos>"]
+    beams = [([initial_idx], 0)]
+    
     for _ in range(max_len):
-        trg_indices = [tgt_vocab.stoi.get(tok, tgt_vocab.stoi["<unk>"]) for tok in trg_tokens]
-        trg_tensor = torch.tensor(trg_indices).unsqueeze(1).to(device)  # [trg_len, 1]
-        output = model(src_tensor, trg_tensor)
-        next_token_idx = output.argmax(dim=2)[-1].item()
-        next_token = tgt_vocab.itos[next_token_idx]
-        if next_token == "<eos>":
+        new_beams = []
+        for trg_sequence, score in beams:
+            # If sequence completed, keep it.
+            if trg_sequence[-1] == tgt_vocab.stoi["<eos>"]:
+                new_beams.append((trg_sequence, score))
+                continue
+            # Prepare target tensor and generate model outputs.
+            trg_tensor = torch.tensor(trg_sequence).unsqueeze(1).to(device)
+            output = model(src_tensor, trg_tensor)
+            # Consider the last token's output.
+            logits = output[-1].squeeze(0)  # [vocab_size]
+            log_probs = torch.log_softmax(logits, dim=0)
+            # Select top 'beam_size' candidates
+            topk_log_probs, topk_indices = torch.topk(log_probs, beam_size)
+            for log_prob, idx in zip(topk_log_probs.tolist(), topk_indices.tolist()):
+                new_seq = trg_sequence + [idx]
+                new_beams.append((new_seq, score + log_prob))
+        # Retain the best beam_size sequences.
+        beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_size]
+        # Stop if all beams end with <eos>.
+        if all(seq[-1] == tgt_vocab.stoi["<eos>"] for seq, _ in beams):
             break
-        trg_tokens.append(next_token)
-    # Return prediction without the start token.
-    return " ".join(trg_tokens[1:])
+    
+    best_seq = beams[0][0]
+    # Remove <sos> and trim <eos> if present.
+    translated_tokens = [tgt_vocab.itos[idx] for idx in best_seq if idx != tgt_vocab.stoi["<sos>"]]
+    if translated_tokens and translated_tokens[-1] == "<eos>":
+        translated_tokens = translated_tokens[:-1]
+    return " ".join(translated_tokens)
 
 # Streamlit UI
 st.title("Arabic to English Translator")
